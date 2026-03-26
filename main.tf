@@ -199,7 +199,7 @@ resource "aws_lambda_function" "notifier" {
   filename      = "lambda_notify.zip"
   function_name = "pmu-slack-notifier"
   role          = aws_iam_role.lambda_role.arn
-  handler       = "notifier.lambda_handler"
+  handler       = "notify.lambda_handler"
   runtime       = "python3.11"
 }
 
