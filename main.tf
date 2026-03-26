@@ -80,51 +80,40 @@ resource "aws_sfn_state_machine" "deployment_orchestrator" {
 definition = jsonencode({
     StartAt = "SecurityAudit",
     States = {
-      # APPEL LAMBDA 1 : Sécurité
       "SecurityAudit": {
         "Type": "Task",
         "Resource": aws_lambda_function.security_check.arn,
-        "Next": "IsRaceInProgress",
-        "Retry": [{ "ErrorEquals": ["Lambda.ServiceException"], "IntervalSeconds": 2, "MaxAttempts": 3 }]
+        "ResultPath": "$.audit", # 🧠 On range le résultat dans la clé "audit"
+        "Next": "IsRaceInProgress"
       },
-      # APPEL LAMBDA 2 : Business Check
       "IsRaceInProgress": {
         "Type": "Task",
         "Resource": aws_lambda_function.race_check.arn,
+        "ResultPath": "$.race", # 🧠 On range le résultat dans la clé "race"
         "Next": "DecisionStep"
       },
-      # LOGIQUE DE DÉCISION
       "DecisionStep": {
         "Type": "Choice",
         "Choices": [
-          { "Variable": "$.race_status", "StringEquals": "RACE_ON", "Next": "Wait1Minute" },
-          { "Variable": "$.security_status", "StringEquals": "CRITICAL", "Next": "NotifyFailure" }
+          { 
+            # On cherche maintenant dans les sous-clés qu'on a créées
+            "Variable": "$.race.race_status", 
+            "StringEquals": "RACE_ON", 
+            "Next": "Wait1Minute" 
+          },
+          { 
+            "Variable": "$.audit.security_status", 
+            "StringEquals": "CRITICAL", 
+            "Next": "NotifyFailure" 
+          }
         ],
         "Default": "DeployToProduction"
       },
-      # ATTENTE (Si course en cours)
-      "Wait1Minute": {
-        "Type": "Wait",
-        "Seconds": 60,
-        "Next": "IsRaceInProgress"
-      },
-      # DÉPLOIEMENT
-      "DeployToProduction": {
-        "Type": "Pass",
-        "Result": { "status": "DEPLOYED" },
-        "Next": "NotifySuccess"
-      },
-      # APPEL LAMBDA 3 : Succès
-      "NotifySuccess": {
-        "Type": "Task",
-        "Resource": aws_lambda_function.notifier.arn,
-        "End": true
-      },
-      "NotifyFailure": {
-        "Type": "Task",
-        "Resource": aws_lambda_function.notifier.arn,
-        "End": true
-      }
+      # ... (le reste reste identique)
+      "Wait1Minute": { "Type": "Wait", "Seconds": 10, "Next": "IsRaceInProgress" },
+      "DeployToProduction": { "Type": "Pass", "Result": { "status": "DEPLOYED" }, "Next": "NotifySuccess" },
+      "NotifySuccess": { "Type": "Task", "Resource": aws_lambda_function.notifier.arn, "End": true },
+      "NotifyFailure": { "Type": "Task", "Resource": aws_lambda_function.notifier.arn, "End": true }
     }
   })
  }
