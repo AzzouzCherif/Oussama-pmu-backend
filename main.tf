@@ -68,3 +68,108 @@ output "github_role_arn" {
   value = aws_iam_role.github_actions_role.arn
   description = "L'ARN du rôle à donner à GitHub Actions"
 }
+
+# ==========================================
+# ⚡ 5. L'ORCHESTRATEUR (AWS Step Functions)
+# ==========================================
+
+resource "aws_sfn_state_machine" "deployment_orchestrator" {
+  name     = "PMU-Deployment-Workflow"
+  role_arn = aws_iam_role.step_functions_role.arn
+
+  definition = jsonencode({
+    Comment = "Orchestrateur de déploiement intelligent avec validation et rollback"
+    StartAt = "NotifyDeploymentStart"
+    States = {
+      # Étape 1 : Notification de début
+      "NotifyDeploymentStart": {
+        "Type": "Pass",
+        "Result": "Déploiement initié sur Fargate...",
+        "Next": "DeployToECS"
+      },
+      # Étape 2 : Déploiement (Simulation)
+      "DeployToECS": {
+        "Type": "Wait",
+        "Seconds": 5,
+        "Next": "HealthCheck"
+      },
+      # Étape 3 : Le Health Check (Le moment critique)
+      "HealthCheck": {
+        "Type": "Choice",
+        "Choices": [
+          {
+            "Variable": "$.status",
+            "StringEquals": "FAILED",
+            "Next": "Rollback"
+          }
+        ],
+        "Default": "SuccessNotification"
+      },
+      # Étape 4A : Succès
+      "SuccessNotification": {
+        "Type": "Pass",
+        "Result": "Déploiement réussi ! Le site est en ligne.",
+        "End": true
+      },
+      # Étape 4B : Échec & Rollback
+      "Rollback": {
+        "Type": "Pass",
+        "Result": "Alerte ! Erreur détectée. Retour à la version précédente...",
+        "End": true
+      }
+    }
+  })
+}
+
+# ==========================================
+# 📡 6. LE DÉCLENCHEUR (Amazon EventBridge)
+# ==========================================
+
+# On crée la règle qui écoute l'ECR
+resource "aws_cloudwatch_event_rule" "ecr_push_rule" {
+  name        = "trigger-step-function-on-ecr-push"
+  description = "Lance le déploiement quand une nouvelle image arrive dans ECR"
+
+  event_pattern = jsonencode({
+    source      = ["aws.ecr"]
+    detail-type = ["ECR Image Action"]
+    detail = {
+      action-type     = ["PUSH"]
+      result          = ["SUCCESS"]
+      repository-name = [aws_ecr_repository.app_repo.name]
+    }
+  })
+}
+
+# On lie la règle à notre Step Function
+resource "aws_cloudwatch_event_target" "step_function_target" {
+  rule      = aws_cloudwatch_event_rule.ecr_push_rule.name
+  target_id = "SendToStepFunction"
+  arn       = aws_sfn_state_machine.deployment_orchestrator.arn
+  role_arn  = aws_iam_role.eventbridge_to_sfn_role.arn
+}
+# Rôle pour Step Functions
+resource "aws_iam_role" "step_functions_role" {
+  name = "StepFunctionsExecutionRole"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{ Action = "sts:AssumeRole", Effect = "Allow", Principal = { Service = "states.amazonaws.com" } }]
+  })
+}
+
+# Rôle pour qu'EventBridge puisse démarrer la Step Function
+resource "aws_iam_role" "eventbridge_to_sfn_role" {
+  name = "EventBridgeToSFNRole"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{ Action = "sts:AssumeRole", Effect = "Allow", Principal = { Service = "events.amazonaws.com" } }]
+  })
+}
+
+resource "aws_iam_role_policy" "sfn_trigger_policy" {
+  role = aws_iam_role.eventbridge_to_sfn_role.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{ Action = "states:StartExecution", Effect = "Allow", Resource = aws_sfn_state_machine.deployment_orchestrator.arn }]
+  })
+}
