@@ -77,49 +77,58 @@ resource "aws_sfn_state_machine" "deployment_orchestrator" {
   name     = "PMU-Deployment-Workflow"
   role_arn = aws_iam_role.step_functions_role.arn
 
-  definition = jsonencode({
-    Comment = "Orchestrateur de déploiement intelligent avec validation et rollback"
-    StartAt = "NotifyDeploymentStart"
+definition = jsonencode({
+    StartAt = "SecurityAudit",
     States = {
-      # Étape 1 : Notification de début
-      "NotifyDeploymentStart": {
-        "Type": "Pass",
-        "Result": "Déploiement initié sur Fargate...",
-        "Next": "DeployToECS"
+      # APPEL LAMBDA 1 : Sécurité
+      "SecurityAudit": {
+        "Type": "Task",
+        "Resource": aws_lambda_function.security_check.arn,
+        "Next": "IsRaceInProgress",
+        "Retry": [{ "ErrorEquals": ["Lambda.ServiceException"], "IntervalSeconds": 2, "MaxAttempts": 3 }]
       },
-      # Étape 2 : Déploiement (Simulation)
-      "DeployToECS": {
-        "Type": "Wait",
-        "Seconds": 5,
-        "Next": "HealthCheck"
+      # APPEL LAMBDA 2 : Business Check
+      "IsRaceInProgress": {
+        "Type": "Task",
+        "Resource": aws_lambda_function.race_check.arn,
+        "Next": "DecisionStep"
       },
-      # Étape 3 : Le Health Check (Le moment critique)
-      "HealthCheck": {
+      # LOGIQUE DE DÉCISION
+      "DecisionStep": {
         "Type": "Choice",
         "Choices": [
-          {
-            "Variable": "$.status",
-            "StringEquals": "FAILED",
-            "Next": "Rollback"
-          }
+          { "Variable": "$.race_status", "StringEquals": "RACE_ON", "Next": "Wait1Minute" },
+          { "Variable": "$.security_status", "StringEquals": "CRITICAL", "Next": "NotifyFailure" }
         ],
-        "Default": "SuccessNotification"
+        "Default": "DeployToProduction"
       },
-      # Étape 4A : Succès
-      "SuccessNotification": {
+      # ATTENTE (Si course en cours)
+      "Wait1Minute": {
+        "Type": "Wait",
+        "Seconds": 60,
+        "Next": "IsRaceInProgress"
+      },
+      # DÉPLOIEMENT
+      "DeployToProduction": {
         "Type": "Pass",
-        "Result": "Déploiement réussi ! Le site est en ligne.",
+        "Result": { "status": "DEPLOYED" },
+        "Next": "NotifySuccess"
+      },
+      # APPEL LAMBDA 3 : Succès
+      "NotifySuccess": {
+        "Type": "Task",
+        "Resource": aws_lambda_function.notifier.arn,
         "End": true
       },
-      # Étape 4B : Échec & Rollback
-      "Rollback": {
-        "Type": "Pass",
-        "Result": "Alerte ! Erreur détectée. Retour à la version précédente...",
+      "NotifyFailure": {
+        "Type": "Task",
+        "Resource": aws_lambda_function.notifier.arn,
         "End": true
       }
     }
   })
-}
+ }
+
 
 # ==========================================
 # 📡 6. LE DÉCLENCHEUR (Amazon EventBridge)
@@ -171,5 +180,57 @@ resource "aws_iam_role_policy" "sfn_trigger_policy" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{ Action = "states:StartExecution", Effect = "Allow", Resource = aws_sfn_state_machine.deployment_orchestrator.arn }]
+  })
+}
+
+# ==========================================
+# 🐍 LES MUSICIENS (AWS Lambda)
+# ==========================================
+
+# 1. Lambda de Sécurité
+resource "aws_lambda_function" "security_check" {
+  filename      = "lambda_security.zip"
+  function_name = "pmu-security-auditor"
+  role          = aws_iam_role.lambda_role.arn
+  handler       = "index.lambda_handler"
+  runtime       = "python3.11"
+}
+
+# 2. Lambda Business (Course en cours ?)
+resource "aws_lambda_function" "race_check" {
+  filename      = "lambda_race.zip"
+  function_name = "pmu-race-validator"
+  role          = aws_iam_role.lambda_role.arn
+  handler       = "index.lambda_handler"
+  runtime       = "python3.11"
+}
+
+# 3. Lambda de Notification
+resource "aws_lambda_function" "notifier" {
+  filename      = "lambda_notify.zip"
+  function_name = "pmu-slack-notifier"
+  role          = aws_iam_role.lambda_role.arn
+  handler       = "index.lambda_handler"
+  runtime       = "python3.11"
+}
+
+resource "aws_iam_role_policy" "sfn_lambda_policy" {
+  role = aws_iam_role.step_functions_role.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "lambda:InvokeFunction"
+      Effect = "Allow"
+      Resource = "*"
+    }]
+  })
+}
+
+# Rôle pour les Lambdas elles-mêmes
+resource "aws_iam_role" "lambda_role" {
+  name = "LambdaExecutionRole"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{ Action = "sts:AssumeRole", Effect = "Allow", Principal = { Service = "lambda.amazonaws.com" } }]
   })
 }
