@@ -1,0 +1,44 @@
+name: CI - Build & Push to ECR (Zero Trust)
+
+on:
+  push:
+    branches: [ "main" ] # Se déclenche à chaque push sur la branche principale
+
+# 🚨 LE SECRET OIDC EST ICI : On donne le droit à GitHub de générer un jeton d'identité crypté
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+    - name: 📥 Checkout du code
+      uses: actions/checkout@v4
+
+    - name: 🔐 Authentification AWS (OIDC)
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: arn:aws:iam::273946439664:role/GitHubActions-ECR-Push-Role
+        aws-region: eu-west-3
+
+    - name: 🚪 Connexion à Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: 📦 Build, Tag, et Push vers AWS
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: pmu-enterprise-app
+        # 🧠 ASTUCE DE PRO : On utilise le hash unique du commit comme version !
+        IMAGE_TAG: ${{ github.sha }} 
+      run: |
+        echo "Construction de l'image..."
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        
+        echo "Envoi vers le coffre-fort AWS..."
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        
+        # On pousse aussi le tag 'latest' pour faciliter le déploiement de la Step Function ensuite
+        docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
